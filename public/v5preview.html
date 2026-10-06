@@ -1,0 +1,85 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; background: #30343a; overflow: hidden; }
+  #hud { position: fixed; top: 8px; left: 8px; color: #fff; font: 14px monospace; z-index: 5; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+}}
+</script>
+</head>
+<body>
+<div id="hud"></div>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+const q = new URLSearchParams(location.search);
+const model = q.get("model") || "/game-assets/weapons/AssaultRifle_1.glb";
+document.getElementById("hud").textContent = model;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x30343a);
+const cam = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.01, 100);
+const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(2, 4, 3); scene.add(key);
+const rim = new THREE.DirectionalLight(0x88aaff, 1.2); rim.position.set(-3, 1, -2); scene.add(rim);
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+const grid = new THREE.GridHelper(2, 20, 0x555555, 0x3a3a3a); scene.add(grid);
+const axes = new THREE.AxesHelper(0.5); scene.add(axes);
+
+const scale = parseFloat(q.get("scale") || "1");
+const rx = parseFloat(q.get("rx") || "0") * Math.PI / 180;
+const ry = parseFloat(q.get("ry") || "0") * Math.PI / 180;
+const rz = parseFloat(q.get("rz") || "0") * Math.PI / 180;
+const dist = parseFloat(q.get("dist") || "1.5");
+const camY = parseFloat(q.get("camy") || "0");
+const smooth = q.get("flat") === "1";
+
+const loader = new GLTFLoader();
+loader.load(model, (gltf) => {
+  const obj = gltf.scene;
+  obj.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(obj);
+  const size = box.getSize(new THREE.Vector3());
+  const c = box.getCenter(new THREE.Vector3());
+  console.log("V5PREVIEW size", size.x.toFixed(3), size.y.toFixed(3), size.z.toFixed(3), "center", c.toArray().map(v => v.toFixed(2)).join(","));
+  obj.traverse((o) => {
+    if (!o.isMesh) return;
+    o.geometry.computeBoundingBox();
+    const bb = o.geometry.boundingBox;
+    o.updateWorldMatrix(true, false);
+    const wb = bb.clone().applyMatrix4(o.matrixWorld);
+    console.log("V5PREVIEW mesh", o.name, o.geometry.attributes.position.count, "verts", (o.material && o.material.name) || "?", "bbox",
+      wb.min.toArray().map(v => v.toFixed(2)).join(",") + " -> " + wb.max.toArray().map(v => v.toFixed(2)).join(","));
+  });
+  obj.position.sub(c);
+  const root = new THREE.Group();
+  root.add(obj);
+  root.rotation.set(rx, ry, rz);
+  root.scale.setScalar(scale);
+  scene.add(root);
+  // auto-fit camera from a 3/4 view
+  const radius = Math.max(size.x, size.y, size.z) * 0.5 * scale;
+  const d = radius / Math.tan((cam.fov * Math.PI / 180) / 2) * 1.4;
+  cam.position.set(d * 0.75, camY + d * 0.3, d * 0.75);
+  cam.lookAt(0, 0, 0);
+  window.__obj = obj;
+  renderer.render(scene, cam);
+  document.title = "READY";
+});
+addEventListener("resize", () => { renderer.setSize(innerWidth, innerHeight); });
+function loop() { renderer.render(scene, cam); requestAnimationFrame(loop); }
+loop();
+</script>
+</body>
+</html>

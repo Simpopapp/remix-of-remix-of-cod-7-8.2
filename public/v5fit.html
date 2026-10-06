@@ -1,0 +1,262 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; background: #23262b; overflow: hidden; }
+  #hud { position: fixed; top: 8px; left: 8px; color: #fff; font: 12px monospace; z-index: 5; white-space: pre; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+}}
+</script>
+</head>
+<body>
+<div id="hud"></div>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+const q = new URLSearchParams(location.search);
+const F = (k, d) => parseFloat(q.get(k) ?? d);
+const hud = document.getElementById("hud");
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x23262b);
+const cam = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.01, 100);
+cam.position.set(0, 0, 0);
+cam.lookAt(0, 0, -1);
+
+const key = new THREE.DirectionalLight(0xfff1dd, 2.2); key.position.set(0.8, 1.5, 0.6); scene.add(key);
+const fill = new THREE.DirectionalLight(0x88aaff, 0.8); fill.position.set(-1.5, 0.2, -1); scene.add(fill);
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+
+const DEG = Math.PI / 180;
+const wepName = q.get("wep") || "rifle";
+const ads = q.get("ads") === "1";
+const view = q.get("view") || "hip";
+const log = (s) => { hud.textContent += s + "\n"; };
+
+Promise.all([
+  new Promise((res, rej) => new GLTFLoader().load("/game-assets/weapons/fps_arms.glb", res, undefined, rej)),
+  new Promise((res, rej) => new GLTFLoader().load(`/game-assets/weapons/${wepName}.glb`, res, undefined, rej)),
+]).then(([armsGltf, wepGltf]) => {
+try {
+  const bones = {};
+  armsGltf.scene.traverse((o) => { if (o.isBone) bones[o.name.replace(/\./g, "")] = o; });
+  const B = (n) => bones[n];
+  const rest = {};
+  for (const k in bones) rest[k] = { pos: bones[k].position.clone(), quat: bones[k].quaternion.clone() };
+
+  // hierarquia para debug
+  const parentOf = (n) => { const b = B(n); return b && b.parent ? b.parent.name : "-"; };
+  log("parent wrist.r=" + parentOf("wristr") + " socket.r=" + parentOf("socketr") + " finger_index1.r=" + parentOf("finger_index1r") + " twist=" + parentOf("forearm.Twist0.r"));
+
+  // ---- arma normalizada (comprimento alvo, cano em -Z) ----
+  const wep = wepGltf.scene;
+  const isPistol = wepName === "pistol";
+  const wb = new THREE.Box3().setFromObject(wep);
+  const wsize = wb.getSize(new THREE.Vector3());
+  const targetLen = isPistol ? F("plen", 0.2) : F("rlen", 0.72);
+  const ws = targetLen / Math.max(wsize.x, wsize.y, wsize.z);
+  const wepWrap = new THREE.Group();
+  wepWrap.add(wep);
+  wep.rotation.y = Math.PI / 2;
+  wep.scale.setScalar(ws);
+  const wb2 = new THREE.Box3().setFromObject(wepWrap);
+  const c2 = wb2.getCenter(new THREE.Vector3());
+  wep.position.sub(c2.clone().applyQuaternion(wep.quaternion.clone().invert()));
+  const lb = new THREE.Box3().setFromObject(wepWrap); // bbox em espaço local do wrapper
+  const ws3 = lb.getSize(new THREE.Vector3());
+  log(`wep size(x,y,z)=${ws3.x.toFixed(3)},${ws3.y.toFixed(3)},${ws3.z.toFixed(3)}`);
+
+  const hipPos = ads ? new THREE.Vector3(0, F("adsY", -0.115), F("adsZ", -0.42))
+                     : new THREE.Vector3(F("wpx", 0.17), F("wpy", -0.24), F("wpz", -0.55));
+  const hipRot = new THREE.Euler(
+    (F("wprx", 0) + (ads ? 0 : 2)) * DEG,
+    F("wpry", isPistol ? -4 : -3) * DEG,
+    (F("wprz", 0) + (ads ? 0 : -3)) * DEG,
+  );
+  const holder = new THREE.Group();
+  holder.position.copy(hipPos);
+  holder.rotation.copy(hipRot);
+  holder.add(wepWrap);
+  scene.add(holder);
+  holder.updateMatrixWorld(true);
+
+  const lz = lb.min.z, hz = lb.max.z, hy = lb.max.y, ly = lb.min.y;
+  const isRifle = !isPistol;
+  const grip = new THREE.Vector3(0, F("gripY", ly + (hy - ly) * (isRifle ? 0.22 : 0.3)), F("gripZ", hz - (hz - lz) * (isRifle ? 0.18 : 0.45)));
+  const hold = new THREE.Vector3(0, F("holdY", ly + (hy - ly) * (isRifle ? 0.45 : 0.35)), F("holdZ", hz - (hz - lz) * (isRifle ? 0.62 : 0.7)));
+  const gwp = holder.localToWorld(grip.clone());
+  const hwp = holder.localToWorld(hold.clone());
+  log(`grip(local)=${grip.toArray().map((v) => v.toFixed(3))} hold=${hold.toArray().map((v) => v.toFixed(3))}`);
+
+  if (view === "side") {
+    holder.position.set(F("wpx", 0), F("wpy", 0), F("wpz", -1.2));
+    holder.rotation.set(0, 0, 0);
+    holder.updateMatrixWorld(true);
+    const sz = new THREE.Vector3(0.9, 0.25, -1.0);
+    cam.position.copy(sz);
+    cam.lookAt(holder.position.x, holder.position.y, holder.position.z);
+    const ax = new THREE.AxesHelper(0.3);
+    ax.position.copy(holder.position);
+    ax.position.z += 0.0;
+    scene.add(ax);
+  }
+
+  // ---- braços: escala + IK de dois ossos ----
+  armsGltf.scene.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; } });
+
+  const armRoot = new THREE.Group();
+  armRoot.add(armsGltf.scene);
+  armRoot.scale.setScalar(F("ascale", 0.13));
+  armRoot.position.set(F("ax", 0), F("ay", -0.08), F("az", 0.0));
+  scene.add(armRoot);
+  armRoot.updateMatrixWorld(true);
+  // ombros por posição no MUNDO do viewmodel (metros): rig coloca os dois no centro
+  const setShoulderWorld = (side, tx, ty, tz) => {
+    const sh = B(`shoulder${side}`);
+    const rootBone = B("root");
+    rootBone.updateWorldMatrix(true, false);
+    const rootPos = new THREE.Vector3().setFromMatrixPosition(rootBone.matrixWorld);
+    const rq = new THREE.Quaternion();
+    rootBone.getWorldQuaternion(rq);
+    const local = new THREE.Vector3(tx, ty, tz).sub(rootPos).divideScalar(armRoot.scale.x).applyQuaternion(rq.invert());
+    sh.position.copy(local);
+  };
+  setShoulderWorld("r", F("shrX", 0.1), F("shrY", -0.3), F("shrZ", -0.05));
+  setShoulderWorld("l", F("shlX", -0.1), F("shlY", -0.3), F("shlZ", -0.15));
+  armRoot.updateMatrixWorld(true);
+
+  const L1 = { r: B("forearmr").position.length() * armRoot.scale.x, l: B("forearml").position.length() * armRoot.scale.x };
+  const L2 = { r: B("wristr").position.length() * armRoot.scale.x, l: B("wristl").position.length() * armRoot.scale.x };
+  log(`hier: bicepr.p=${B("bicepr").parent.name} forearmr.p=${B("forearmr").parent.name} wristr.p=${B("wristr").parent.name} socketr.p=${B("socketr").parent.name}`);
+  log(`L1.r=${L1.r.toFixed(3)} L2.r=${L2.r.toFixed(3)} socketLocal=${B("socketr").position.toArray().map(v=>v.toFixed(2))}`);
+  if (q.get("noik") === "1") {
+    armRoot.updateMatrixWorld(true);
+    if (q.get("dump") === "1") {
+      window.__chainDump = [];
+      for (const n of ["root", "shoulderr", "bicepr", "forearmr", "wristr", "socketr", "shoulderl", "bicepl", "forearml", "wristl", "socketl"]) {
+        const b = B(n);
+        if (!b) continue;
+        const m = b.matrixWorld.elements;
+        const colLen = (i) => Math.hypot(m[i], m[i+1], m[i+2]);
+        window.__chainDump.push(`${n} localPos=${b.position.toArray().map(v=>v.toFixed(3))} mScale=${[colLen(0),colLen(5),colLen(10)].map(v=>v.toFixed(3))} world=${new THREE.Vector3().setFromMatrixPosition(b.matrixWorld).divideScalar(armRoot.scale.x).toArray().map(v=>v.toFixed(2))}`);
+      }
+      window.__dumpReady = true;
+    }
+    for (const n of ["root", "shoulderr", "bicepr", "forearmr", "wristr", "socketr", "finger_index1r", "shoulderl", "bicepl", "forearml", "wristl", "socketl"]) {
+      const b = B(n);
+      if (!b) { log(`${n}: MISSING`); continue; }
+      const wp = new THREE.Vector3().setFromMatrixPosition(b.matrixWorld);
+      log(`${n}: local=${b.position.toArray().map((v) => v.toFixed(2))} world=${wp.toArray().map((v) => (v / armRoot.scale.x).toFixed(2))} parent=${b.parent.name}`);
+    }
+  }
+
+  function solveArm(side, palmTargetWorld, poleWorld) {
+    const bicep = B(`bicep${side}`);
+    const forearm = B(`forearm${side}`);
+    const wristB = B(`wrist${side}`);
+    bicep.updateWorldMatrix(true, false);
+    const S = new THREE.Vector3().setFromMatrixPosition(bicep.matrixWorld);
+    const wantQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(F(`w${side}x`, 0) * DEG, F(`w${side}y`, 0) * DEG, F(`w${side}z`, 0) * DEG));
+    const palmOff = B(`socket${side}`).position.clone().multiplyScalar(armRoot.scale.x).applyQuaternion(wantQ);
+    const W = palmTargetWorld.clone().sub(palmOff);
+    const d = W.clone().sub(S);
+    const reach = L1[side] + L2[side] - 0.005;
+    let l = d.length();
+    if (l > reach) { d.setLength(reach); l = reach; }
+    const cosT = THREE.MathUtils.clamp((L1[side] ** 2 + l * l - L2[side] ** 2) / (2 * L1[side] * l), -1, 1);
+    const th = Math.acos(cosT);
+    const dHat = d.clone().normalize();
+    let axis = new THREE.Vector3().crossVectors(dHat, poleWorld);
+    if (axis.lengthSq() < 1e-8) axis.set(1, 0, 0);
+    axis.normalize();
+    const p = new THREE.Vector3().crossVectors(axis, dHat).normalize();
+    const E = S.clone().addScaledVector(dHat, Math.cos(th) * L1[side]).addScaledVector(p, Math.sin(th) * L1[side]);
+
+    const aim = (bone, childBone, toWorld) => {
+      bone.updateWorldMatrix(true, false);
+      const jp = new THREE.Vector3().setFromMatrixPosition(bone.matrixWorld);
+      const pq = new THREE.Quaternion();
+      bone.parent.getWorldQuaternion(pq);
+      const want = toWorld.clone().sub(jp).normalize().applyQuaternion(pq.invert());
+      bone.quaternion.setFromUnitVectors(childBone.position.clone().normalize(), want);
+    };
+    aim(bicep, forearm, E);
+    bicep.updateWorldMatrix(true, true);
+    aim(forearm, wristB, W);
+    forearm.updateWorldMatrix(true, false);
+    const wp = new THREE.Vector3().setFromMatrixPosition(wristB.matrixWorld);
+    const pq2 = new THREE.Quaternion();
+    wristB.parent.getWorldQuaternion(pq2);
+    wristB.quaternion.copy(pq2.invert().multiply(wantQ));
+    wristB.updateWorldMatrix(true, true);
+    log(`  ${side}: S=${S.toArray().map(v=>v.toFixed(2))} E=${E.toArray().map(v=>v.toFixed(2))} W=${W.toArray().map(v=>v.toFixed(2))} wrist=${wp.toArray().map(v=>v.toFixed(3))} errW=${wp.distanceTo(W).toFixed(3)}`);
+  }
+
+  const poleR = new THREE.Vector3(F("polRx", -0.6), F("polRy", -1), F("polRz", 0.2)).normalize();
+  const poleL = new THREE.Vector3(F("polLx", 0.6), F("polLy", -1), F("polLz", 0.2)).normalize();
+  if (q.get("noik") !== "1") {
+    solveArm("r", gwp, poleR);
+    solveArm("l", hwp, poleL);
+  }
+
+  const curlAxis = q.get("cax") || "x";
+  const curlR = F("curlR", 45), curlL = F("curlL", 45);
+  const fingerNames = ["index", "middle", "ring", "pinky"];
+  for (const side of ["r", "l"]) {
+    const curl = (side === "r" ? curlR : curlL) * DEG * (side === "r" ? 1 : -1);
+    for (const fn of fingerNames) {
+      for (let seg = 1; seg <= 3; seg++) {
+        const b = B(`finger_${fn}${seg}${side}`);
+        if (!b) continue;
+        const axis = new THREE.Vector3();
+        axis[curlAxis] = curl * (seg === 1 ? 0.55 : 1);
+        const r = new THREE.Quaternion().setFromAxisAngle(axis, 1);
+        b.quaternion.multiply(r);
+      }
+    }
+    const thumb = B(`finger_thumb1${side}`);
+    if (thumb) thumb.quaternion.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(F("thx", 20) * DEG, F("thy", 0) * DEG, 0)));
+  }
+
+  if (q.get("mk") === "1") {
+    const mk = (p, color) => {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(0.008, 8, 8), new THREE.MeshBasicMaterial({ color }));
+      m.position.copy(p); scene.add(m);
+    };
+    mk(gwp, 0xff2222); mk(hwp, 0x22ff44);
+    mk(new THREE.Vector3().setFromMatrixPosition(B("socketr").matrixWorld), 0x22aaff);
+    mk(new THREE.Vector3().setFromMatrixPosition(B("socketl").matrixWorld), 0x22aaff);
+  }
+
+  armsGltf.scene.updateMatrixWorld(true);
+  const gs = new THREE.Vector3().setFromMatrixPosition(B("socketr").matrixWorld);
+  const ls = new THREE.Vector3().setFromMatrixPosition(B("socketl").matrixWorld);
+  const sr = new THREE.Vector3().setFromMatrixPosition(B("shoulderr").matrixWorld);
+  log(`S.r=${sr.toArray().map((v) => v.toFixed(2))} reach=${(L1.r + L2.r).toFixed(3)}`);
+  const wr = new THREE.Vector3().setFromMatrixPosition(B("wristr").matrixWorld);
+  const rel = gs.clone().sub(wr);
+  const wq = new THREE.Quaternion(); B("wristr").getWorldQuaternion(wq);
+  const relLocal = rel.clone().applyQuaternion(wq.clone().invert()).divideScalar(armRoot.scale.x);
+  log(`socket.r=${gs.toArray().map((v) => v.toFixed(3))} targetR=${gwp.toArray().map((v) => v.toFixed(3))} err=${gs.distanceTo(gwp).toFixed(3)}`);
+  log(`socket.l=${ls.toArray().map((v) => v.toFixed(3))} targetL=${hwp.toArray().map((v) => v.toFixed(3))} err=${ls.distanceTo(hwp).toFixed(3)}`);
+  log(`wrist.r=${wr.toArray().map((v) => v.toFixed(3))} wqEuler=${new THREE.Euler().setFromQuaternion(wq).toArray().map((v) => (v * 57.3).toFixed(0))} relLocalUnits=${relLocal.toArray().map((v) => v.toFixed(2))}`);
+  document.title = "READY";
+} catch (e) { log("ERR " + e.stack); document.title = "READY"; }
+});
+addEventListener("resize", () => { renderer.setSize(innerWidth, innerHeight); });
+function loop() { renderer.render(scene, cam); requestAnimationFrame(loop); }
+loop();
+</script>
+</body>
+</html>

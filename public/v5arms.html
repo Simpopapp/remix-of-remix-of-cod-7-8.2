@@ -1,0 +1,132 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; background: #2a2e34; overflow: hidden; }
+  #hud { position: fixed; top: 8px; left: 8px; color: #fff; font: 12px monospace; z-index: 5; white-space: pre; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+}}
+</script>
+</head>
+<body>
+<div id="hud"></div>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+const q = new URLSearchParams(location.search);
+const hud = document.getElementById("hud");
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x2a2e34);
+const cam = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.01, 100);
+
+const key = new THREE.DirectionalLight(0xffffff, 2.4); key.position.set(1, 2, 2); scene.add(key);
+const fill = new THREE.DirectionalLight(0x99aaff, 0.9); fill.position.set(-2, 0.5, -1); scene.add(fill);
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+
+const loader = new GLTFLoader();
+const F = (k, d) => parseFloat(q.get(k) ?? d);
+
+Promise.all([
+  new Promise(res => loader.load("/game-assets/weapons/fps_arms.glb", res)),
+  new Promise(res => loader.load(q.get("wep") ? "/game-assets/weapons/" + q.get("wep") + ".glb" : "/game-assets/weapons/rifle.glb", res)),
+]).then(([armsGltf, wepGltf]) => {
+  const arms = armsGltf.scene;
+  const wep = wepGltf.scene;
+
+  // normalize weapon scale: rifle target length, pistol target length
+  const isPistol = (q.get("wep") || "").startsWith("pistol");
+  const wbox = new THREE.Box3().setFromObject(wep);
+  const wsize = wbox.getSize(new THREE.Vector3());
+  const wlen = Math.max(wsize.x, wsize.y, wsize.z);
+  const wtarget = isPistol ? 0.2 : 0.8;
+  const ws = wtarget / wlen;
+
+  // weapon wrapper: oriented so muzzle points -Z (model points +X)
+  const wepWrap = new THREE.Group();
+  wepWrap.add(wep);
+  wep.rotation.y = Math.PI / 2;
+  wep.scale.setScalar(ws);
+  const wb2 = new THREE.Box3().setFromObject(wep);
+  const wc = wb2.getCenter(new THREE.Vector3());
+  wep.position.sub(wc);
+  wep.position.z = -wsize.z * ws * 0; // keep grip near center; tune via grip params
+
+  // arms root
+  const armRoot = new THREE.Group();
+  armRoot.add(arms);
+  scene.add(armRoot);
+
+  // find bones (GLTFLoader sanitizes names: dots removed)
+  const bones = {};
+  arms.traverse(o => { if (o.isBone) bones[o.name.replace(/\./g, "")] = o; });
+
+  // log rest world transforms of key bones
+  const out = [];
+  for (const n of ["root", "shoulder.r", "bicep.r", "forearm.r", "wrist.r", "socket.r", "shoulder.l", "bicep.l", "forearm.l", "wrist.l", "socket.l"]) {
+    const b = bones[n.replace(/\./g, "")];
+    if (!b) { out.push(n + " MISSING"); continue; }
+    b.updateWorldMatrix(true, false);
+    const p = new THREE.Vector3().setFromMatrixPosition(b.matrixWorld);
+    const qq = new THREE.Quaternion();
+    b.matrixWorld.decompose(new THREE.Vector3(), qq, new THREE.Vector3());
+    out.push(`${n} pos(${p.x.toFixed(2)},${p.y.toFixed(2)},${p.z.toFixed(2)}) fwd(${qq.x.toFixed(2)},${qq.y.toFixed(2)},${qq.z.toFixed(2)},${qq.w.toFixed(2)})`);
+  }
+  console.log("ARMS " + out.join(" | "));
+
+  // apply pose from query: rot bone names like r_bicep=x,y,z degrees applied as local euler XYZ
+  for (const [k, v] of q) {
+    if (!k.startsWith("p_")) continue;
+    const boneName = k.slice(2).replace(/_/g, ".");
+    const b = bones[boneName.replace(/\./g, "")];
+    if (!b) { console.log("NOBONE", boneName); continue; }
+    const [x, y, z] = v.split(",").map(Number);
+    const e = new THREE.Euler((x || 0) * Math.PI / 180, (y || 0) * Math.PI / 180, (z || 0) * Math.PI / 180);
+    b.quaternion.multiply(new THREE.Quaternion().setFromEuler(e));
+  }
+  // optional arms scale + position
+  armRoot.scale.setScalar(F("ascale", 1));
+  armRoot.position.set(F("ax", 0), F("ay", 0), F("az", 0));
+  arms.updateMatrixWorld(true);
+
+  // attach weapon to socket.r
+  const socket = bones["socketr"];
+  const wx = F("wx", 0), wy = F("wy", 0), wz = F("wz", 0);
+  const wrx = F("wrx", 0), wry = F("wry", 0), wrz = F("wrz", 0);
+  wepWrap.position.set(wx, wy, wz);
+  wepWrap.rotation.set(wrx * Math.PI / 180, wry * Math.PI / 180, wrz * Math.PI / 180);
+  socket.add(wepWrap);
+  socket.updateWorldMatrix(true, false);
+
+  // grip marker visual (red sphere at socket origin)
+  const mk = new THREE.Mesh(new THREE.SphereGeometry(0.015, 12, 12), new THREE.MeshBasicMaterial({ color: 0xff2222 }));
+  socket.add(mk);
+
+  // camera from params (positions in viewmodel space, looking at grip marker)
+  const gp = new THREE.Vector3();
+  mk.getWorldPosition(gp);
+  const cx = F("cx", 0), cy = F("cy", 0.1), cz = F("cz", 0.4);
+  const lx = F("lx", gp.x), ly = F("ly", gp.y), lz = F("lz", gp.z);
+  cam.position.set(cx, cy, cz);
+  cam.lookAt(lx, ly, lz);
+
+  renderer.render(scene, cam);
+  document.title = "READY";
+  hud.textContent = out.join("\n") + "\ngrip world: " + gp.toArray().map(v => v.toFixed(3)).join(",");
+});
+function loop() { renderer.render(scene, cam); requestAnimationFrame(loop); }
+loop();
+</script>
+</body>
+</html>
